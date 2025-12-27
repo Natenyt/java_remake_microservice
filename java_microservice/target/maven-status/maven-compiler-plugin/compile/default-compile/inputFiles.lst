@@ -1,0 +1,8 @@
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\Application.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\controller\V1Controller.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\dto\TrainCorrectionRequest.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\dto\GeminiSettings.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\dto\AnalyzeRequest.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\config\AppConfig.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\dto\Candidate.java
+D:\Multiback\java_microservice\src\main\java\com\civicconnect\ai\service\AiPipelineService.java

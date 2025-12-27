@@ -1,0 +1,8 @@
+com\civicconnect\ai\dto\AnalyzeRequest.class
+com\civicconnect\ai\dto\Candidate.class
+com\civicconnect\ai\Application.class
+com\civicconnect\ai\controller\V1Controller.class
+com\civicconnect\ai\dto\GeminiSettings.class
+com\civicconnect\ai\dto\TrainCorrectionRequest.class
+com\civicconnect\ai\config\AppConfig.class
+com\civicconnect\ai\service\AiPipelineService.class
