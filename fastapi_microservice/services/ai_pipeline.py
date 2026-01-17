@@ -12,23 +12,18 @@ import google.generativeai as genai
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-# Import models from the api/v1 folder
 from api.v1.models import AnalyzeRequest, TrainCorrectionRequest, Candidate
 
-# --- Configuration ---
+# Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Docker Networking: Default to 'localhost' for local dev, override with 'qdrant' in Docker
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost") 
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
-# Docker Networking: Default to 'http://127.0.0.1:8000' for local dev, override with 'http://django_backend:8000' in Docker
 DJANGO_BACKEND_URL = os.getenv("DJANGO_BACKEND_URL", "http://127.0.0.1:8000")
 
-# --- FORCE LOGGING TO CONSOLE ---
-# This ensures logs appear in your terminal even if Uvicorn tries to capture them
+# Logging
 logger = logging.getLogger("ai_pipeline")
 logger.setLevel(logging.INFO)
 
-# Check if handlers already exist to avoid double logging
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
@@ -37,25 +32,24 @@ if not logger.handlers:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# --- Global Clients (Connection Pooling) ---
+# Global Clients
 qdrant_client = None
 
 def init_qdrant():
-    """Initializes Qdrant Client with smart fallback to localhost."""
+    """Initialize Qdrant client with localhost fallback."""
     global qdrant_client
     
-    # Attempt 1: Configured Host (e.g., 'qdrant')
+
     try:
         logger.info(f"Attempting connection to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}...")
         client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        # Force a request to verify connectivity immediately
-        client.get_collections() 
+        client.get_collections()
         logger.info(f"✅ SUCCESS: Connected to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}")
         return client
     except Exception as e:
         logger.warning(f"⚠️ Failed to connect to {QDRANT_HOST}: {e}")
         
-        # Attempt 2: Fallback to localhost if we aren't already there
+
         if QDRANT_HOST != "localhost" and QDRANT_HOST != "127.0.0.1":
             try:
                 logger.info("🔄 Attempting fallback to 'localhost'...")
@@ -70,13 +64,11 @@ def init_qdrant():
             
     return None
 
-# Initialize clients
 qdrant_client = init_qdrant()
 http_client = httpx.AsyncClient(timeout=10.0)
 
-# --- Helper: Run Blocking Code in Threads ---
 async def async_embed(text: str, model: str = "models/text-embedding-004"):
-    """Runs the blocking Google Embed call in a separate thread"""
+    """Generate text embedding via Gemini API."""
     return await asyncio.to_thread(
         genai.embed_content,
         model=model,
@@ -85,7 +77,7 @@ async def async_embed(text: str, model: str = "models/text-embedding-004"):
     )
 
 async def async_generate(model_name: str, prompt: str, config: dict):
-    """Runs the blocking Google Generate call in a separate thread"""
+    """Generate LLM response via Gemini API."""
     model = genai.GenerativeModel(model_name)
     return await asyncio.to_thread(
         model.generate_content,
@@ -93,7 +85,6 @@ async def async_generate(model_name: str, prompt: str, config: dict):
         generation_config=config
     )
 
-# --- Main Pipelines ---
 
 async def process_message_pipeline(request: AnalyzeRequest):
     start_time = time.time()
@@ -115,15 +106,15 @@ async def process_message_pipeline(request: AnalyzeRequest):
     
     text = request.text
     
-    # Step 1: Language Detection
+    # Language detection
     language = "uz"
-    if any("\u0400" <= char <= "\u04FF" for char in text): # Cyrillic check
+    if any("\u0400" <= char <= "\u04FF" for char in text):
         language = "ru"
     
     processing_data["language_detected"] = language
     logger.info(f"Step 1 [Lang Detect]: Detected '{language}'")
 
-    # Step 2: Injection Detection
+    # Injection detection
     is_injection = False
     risk_score = 0.0
     injection_keywords = ["ignore previous instructions", "system prompt", "delete all data"]
@@ -143,7 +134,7 @@ async def process_message_pipeline(request: AnalyzeRequest):
         await send_webhook(f"{DJANGO_BACKEND_URL}/api/internal/injection-alert/", processing_data)
         return
 
-    # Step 3: Vector Embedding (Non-Blocking)
+    # Vector embedding
     embedding_model = "models/text-embedding-004"
     vector = []
     try:
@@ -154,16 +145,14 @@ async def process_message_pipeline(request: AnalyzeRequest):
         logger.info(f"Step 3 [Embedding]: Success. Vector length: {len(vector)}")
     except Exception as e:
         logger.error(f"Step 3 [Embedding] FAILED: {e}")
-        # We fail gracefully here, stopping pipeline
-        return 
+        return
         
-    # Step 4: Semantic Search
+    # Semantic search
     candidates = []
     if qdrant_client:
         try:
             logger.info(f"Step 4 [Search]: Querying Qdrant (Collection: 'departments')...")
             
-            # First check if collection exists and has points
             try:
                 collection_info = await asyncio.to_thread(
                     qdrant_client.get_collection,
@@ -171,13 +160,10 @@ async def process_message_pipeline(request: AnalyzeRequest):
                 )
                 
                 if collection_info.points_count == 0:
-                    logger.warning(f"Step 4 [Search]: Collection 'departments' is empty. Please index departments first.")
-                    # Skip the query if collection is empty
+                    logger.warning(f"Step 4 [Search]: Collection 'departments' is empty.")
                 else:
                     logger.info(f"Step 4 [Search]: Collection has {collection_info.points_count} points.")
                     
-                    # Debug: Try to check what language values exist in the collection
-                    # First try without filter to see sample payloads
                     try:
                         sample_response = await asyncio.to_thread(
                             qdrant_client.scroll,
@@ -203,13 +189,11 @@ async def process_message_pipeline(request: AnalyzeRequest):
                     )
                     logger.info(f"Step 4 [Search]: Filter: language == '{language}'")
 
-                    # --- QDRANT V1.16+ FIX ---
-                    # The "OutputTooSmall" error occurs when filter returns fewer results than limit
-                    # Try with progressively smaller limits, then fallback to no filter
+
                     search_response = None
                     hits = []
                     
-                    # Try filtered query with decreasing limits
+
                     for limit in [3, 2, 1]:
                         try:
                             logger.info(f"Step 4 [Search]: Attempting query with limit={limit} and language filter...")
@@ -231,27 +215,25 @@ async def process_message_pipeline(request: AnalyzeRequest):
                             if "OutputTooSmall" in error_str or "500" in error_str:
                                 logger.warning(f"Step 4 [Search]: Query failed with limit={limit}: {error_str[:100]}")
                                 if limit > 1:
-                                    continue  # Try with smaller limit
+                                    continue
                                 else:
                                     # Last attempt failed, try without filter as fallback
-                                    logger.warning("Step 4 [Search]: Filtered query failed, trying without language filter...")
+                                    logger.warning("Step 4 [Search]: Filtered query failed, trying unfiltered...")
                                     try:
                                         search_response = await asyncio.to_thread(
                                             qdrant_client.query_points,
                                             collection_name="departments",
                                             query=vector,
-                                            limit=5,  # Get more results when no filter
+                                            limit=5,
                                             with_payload=True,
                                             with_vectors=False
                                         )
                                         all_hits = search_response.points if hasattr(search_response, 'points') else []
-                                        # Filter results by language in Python instead
                                         filtered_hits = [h for h in all_hits if h.payload.get("language") == language]
                                         if filtered_hits:
-                                            hits = filtered_hits[:3]  # Take top 3 matching language
+                                            hits = filtered_hits[:3]
                                             logger.info(f"Step 4 [Search]: Query without filter succeeded, filtered to {len(hits)} {language} results.")
                                         else:
-                                            # No matching language, use all results
                                             hits = all_hits[:3]
                                             logger.warning(f"Step 4 [Search]: No {language} results found, using top 3 results regardless of language.")
                                         break
@@ -277,9 +259,7 @@ async def process_message_pipeline(request: AnalyzeRequest):
                             score=score
                         ))
             except Exception as coll_error:
-                # Collection might not exist or be inaccessible
                 logger.error(f"Step 4 [Search]: Failed to access collection: {coll_error}")
-                # Check if collection exists
                 try:
                     collections = await asyncio.to_thread(qdrant_client.get_collections)
                     collection_names = [c.name for c in collections.collections]
@@ -292,20 +272,16 @@ async def process_message_pipeline(request: AnalyzeRequest):
                     
         except Exception as e:
              logger.error(f"Step 4 [Search] FAILED: {e}")
-             # Log full error details for debugging
              import traceback
              logger.error(f"Full traceback: {traceback.format_exc()}")
     else:
         logger.error("Step 4 [Search] SKIPPED: Qdrant client is not connected.")
 
-    # --- CRITICAL SAFETY CHECK ---
-    # If Qdrant returns 0 results (empty database), DO NOT ask Gemini to pick an ID.
     if not candidates:
-        logger.warning("Step 5 [LLM]: SKIPPED. No candidates found in Qdrant (Database might be empty).")
-        processing_data["reason"] = "No relevant department found in knowledge base."
-        # We allow the process to continue to Step 6, but with NO suggested ID.
+        logger.warning("Step 5 [LLM]: SKIPPED. No candidates found.")
+        processing_data["reason"] = "No relevant department found."
     else:
-        # Step 5: LLM Reranking & Decision
+        # LLM reranking
         model_name = request.settings.model if request.settings else "gemini-2.0-flash-001"
         temperature = request.settings.temperature if request.settings else 0.2
         
@@ -355,8 +331,7 @@ async def process_message_pipeline(request: AnalyzeRequest):
             processing_data["intent_label"] = llm_result.get("intent")
             processing_data["suggested_department_id"] = llm_result.get("department_id")
             processing_data["confidence_score"] = llm_result.get("confidence")
-            # Ideally fetch name from candidate list matching ID
-            processing_data["suggested_department_name"] = "Unknown" 
+            processing_data["suggested_department_name"] = "Unknown"
             processing_data["reason"] = llm_result.get("reason")
             
             usage = response.usage_metadata
@@ -368,18 +343,16 @@ async def process_message_pipeline(request: AnalyzeRequest):
 
         except Exception as e:
             error_str = str(e)
-            # Check if it's a quota/rate limit error
             if "429" in error_str or "quota" in error_str.lower() or "rate limit" in error_str.lower():
                 logger.warning(f"Step 5 [LLM]: Quota/Rate limit exceeded. Using top vector search result as fallback.")
-                
-                # Fallback: Use the top candidate from vector search
+
                 if candidates:
                     top_candidate = candidates[0]
                     processing_data["intent_label"] = "Auto-detected"
                     processing_data["suggested_department_id"] = top_candidate.id
                     processing_data["confidence_score"] = int(top_candidate.score * 100)  # Convert 0-1 to 0-100
                     processing_data["suggested_department_name"] = top_candidate.name
-                    processing_data["reason"] = f"LLM unavailable (quota exceeded). Using top vector search result with {top_candidate.score:.2%} similarity."
+                    processing_data["reason"] = f"LLM quota exceeded. Using vector search fallback ({top_candidate.score:.2%} similarity)."
                     logger.info(f"Step 5 [LLM]: Fallback applied. Using Dept ID={top_candidate.id}, Name={top_candidate.name}, Score={top_candidate.score:.2%}")
                 else:
                     processing_data["reason"] = "LLM quota exceeded and no vector search results available."
@@ -387,7 +360,7 @@ async def process_message_pipeline(request: AnalyzeRequest):
                 logger.error(f"Step 5 [LLM] FAILED: {e}")
                 processing_data["reason"] = f"LLM Error: {e}"
 
-    # Step 6: Completion
+    # Completion
     processing_data["processing_time_ms"] = int((time.time() - start_time) * 1000)
     processing_data["vector_search_results"] = [c.dict() for c in candidates]
     
@@ -396,9 +369,8 @@ async def process_message_pipeline(request: AnalyzeRequest):
     logger.info(f"--- END PIPELINE: {request.message_uuid} ---")
 
 async def send_webhook(url: str, data: Dict[str, Any]):
-    """Uses global http_client for better performance"""
+    """Send processing result to Django backend."""
     try:
-        # Debug print payload keys to ensure we aren't sending massive binary blobs
         logger.info(f"Sending webhook to {url} | Keys: {list(data.keys())}")
         response = await http_client.post(url, json=data)
         logger.info(f"Webhook response status: {response.status_code}")
